@@ -130,6 +130,11 @@ pub struct Claims {
     pub iat: u64,
     /// The "exp" (expiration time) claim identifies the expiration time on or after which the JWT
     /// MUST NOT be accepted for processing.
+    ///
+    /// Per [RFC-7519 §4.1.4](https://www.rfc-editor.org/rfc/rfc7519#section-4.1.4), the claim
+    /// must be a NumericDate when present, so it is omitted entirely (rather than serialized as
+    /// `null`) when unset. Some execution clients (e.g. Besu) reject tokens with `"exp": null`.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub exp: Option<u64>,
 }
 
@@ -282,6 +287,8 @@ impl FromStr for JwtSecret {
 mod tests {
     use super::*;
     use assert_matches::assert_matches;
+    #[cfg(feature = "serde")]
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     use jsonwebtoken::{encode, EncodingKey, Header};
     use similar_asserts::assert_eq;
     #[cfg(feature = "std")]
@@ -449,6 +456,39 @@ mod tests {
         let result = secret.validate(&jwt);
 
         assert!(matches!(result, Ok(())));
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn unset_exp_claim_is_omitted_from_payload() {
+        // <https://github.com/alloy-rs/alloy/issues/4031>
+        let secret = JwtSecret::random();
+
+        let claims = Claims { iat: get_current_timestamp(), exp: None };
+        let jwt = secret.encode(&claims).unwrap();
+
+        let payload = jwt.split('.').nth(1).unwrap();
+        let payload = URL_SAFE_NO_PAD.decode(payload).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+
+        let obj = payload.as_object().unwrap();
+        assert!(obj.contains_key("iat"));
+        assert!(!obj.contains_key("exp"), "unset `exp` must be omitted, not serialized as null");
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn set_exp_claim_is_serialized() {
+        let secret = JwtSecret::random();
+
+        let claims = Claims { iat: get_current_timestamp(), exp: Some(10000000000) };
+        let jwt = secret.encode(&claims).unwrap();
+
+        let payload = jwt.split('.').nth(1).unwrap();
+        let payload = URL_SAFE_NO_PAD.decode(payload).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+
+        assert_eq!(payload.as_object().unwrap()["exp"], serde_json::json!(10000000000u64));
     }
 
     #[test]
